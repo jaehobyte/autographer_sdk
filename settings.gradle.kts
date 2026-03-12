@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "autographer"
 include(":agent")
+include(":app")

@@ -9,3 +9,11 @@
 .cxx
 local.properties
 /agent/build
+/app/build
+
+# Android SDK (installed locally)
+/build-tools
+/licenses
+/platform-tools
+/platforms
+/cmdline-tools
