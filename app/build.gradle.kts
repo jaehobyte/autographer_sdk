@@ -40,10 +40,19 @@ android {
 }
 
 dependencies {
-    implementation(project(":agent"))
+    implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
+
+    // AAR transitive dependencies
     implementation(libs.kotlin.stdlib)
+    implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
     implementation(libs.okhttp)
+    implementation(libs.okhttp.sse)
+    implementation(libs.moshi)
+    implementation(libs.moshi.kotlin)
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")

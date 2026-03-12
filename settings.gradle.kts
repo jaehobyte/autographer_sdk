@@ -17,3 +17,5 @@ dependencyResolutionManagement {
 rootProject.name = "autographer"
 include(":agent")
 include(":app")
+
+// :app uses the pre-built AAR from app/libs, not :agent source directly
