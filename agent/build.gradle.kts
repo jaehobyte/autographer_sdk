@@ -34,11 +34,11 @@ android {
 }
 
 dependencies {
-    implementation(libs.kotlin.stdlib)
-    implementation(libs.coroutines.core)
-    implementation(libs.coroutines.android)
-    implementation(libs.okhttp)
-    implementation(libs.okhttp.sse)
+    api(libs.kotlin.stdlib)
+    api(libs.coroutines.core)
+    api(libs.coroutines.android)
+    api(libs.okhttp)
+    api(libs.okhttp.sse)
     implementation(libs.moshi)
     implementation(libs.moshi.kotlin)
     ksp(libs.moshi.codegen)
