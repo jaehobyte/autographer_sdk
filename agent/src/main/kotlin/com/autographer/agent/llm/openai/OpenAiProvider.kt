@@ -1,5 +1,6 @@
 package com.autographer.agent.llm.openai
 
+import com.autographer.agent.core.LlmException
 import com.autographer.agent.llm.LlmCapability
 import com.autographer.agent.llm.LlmConfig
 import com.autographer.agent.llm.LlmProvider
@@ -39,6 +40,8 @@ class OpenAiProvider(
 
     override fun maxContextTokens(): Int = 128_000
 
+    override fun defaultModel(): String = "gpt-4o"
+
     override suspend fun complete(
         messages: List<Message>,
         tools: List<ToolSchema>?,
@@ -56,14 +59,17 @@ class OpenAiProvider(
 
         val response = client.newCall(request).execute()
         val body = response.body?.string()
-            ?: throw RuntimeException("Empty response body")
+            ?: throw LlmException("Empty response body from OpenAI")
 
         if (!response.isSuccessful) {
-            throw RuntimeException("OpenAI API error ${response.code}: $body")
+            throw LlmException(
+                "OpenAI API error: $body",
+                code = response.code,
+            )
         }
 
         val apiResponse = JsonUtil.fromJson<OpenAiChatResponse>(body)
-            ?: throw RuntimeException("Failed to parse OpenAI response")
+            ?: throw LlmException("Failed to parse OpenAI response")
 
         OpenAiMapper.fromApiResponse(apiResponse)
     }
@@ -84,43 +90,51 @@ class OpenAiProvider(
             .build()
 
         val call = client.newCall(request)
-        val response = call.execute()
-
-        if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: "Unknown error"
-            close(RuntimeException("OpenAI API error ${response.code}: $errorBody"))
-            return@callbackFlow
-        }
-
-        val reader = BufferedReader(
-            InputStreamReader(response.body!!.byteStream())
-        )
 
         try {
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val data = line ?: continue
-                if (!data.startsWith("data: ")) continue
-                val json = data.removePrefix("data: ").trim()
-                if (json == "[DONE]") break
+            val response = call.execute()
 
-                try {
-                    val chunk = JsonUtil.fromJson<OpenAiChatResponse>(json)
-                    val choice = chunk?.choices?.firstOrNull() ?: continue
-                    val mapped = OpenAiMapper.fromStreamChunk(
-                        choice.delta, choice.finishReason
-                    )
-                    trySend(mapped)
-                } catch (e: Exception) {
-                    Logger.w("Failed to parse stream chunk: $json", e)
-                }
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: "Unknown error"
+                throw LlmException(
+                    "OpenAI API error: $errorBody",
+                    code = response.code,
+                )
             }
-        } finally {
-            reader.close()
-            response.close()
+
+            val reader = BufferedReader(
+                InputStreamReader(response.body!!.byteStream())
+            )
+
+            try {
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    val data = line ?: continue
+                    if (!data.startsWith("data: ")) continue
+                    val json = data.removePrefix("data: ").trim()
+                    if (json == "[DONE]") break
+
+                    try {
+                        val chunk = JsonUtil.fromJson<OpenAiChatResponse>(json)
+                        val choice = chunk?.choices?.firstOrNull() ?: continue
+                        val mapped = OpenAiMapper.fromStreamChunk(
+                            choice.delta, choice.finishReason
+                        )
+                        trySend(mapped)
+                    } catch (e: Exception) {
+                        Logger.w("Failed to parse stream chunk: $json", e)
+                    }
+                }
+            } finally {
+                reader.close()
+                response.close()
+            }
+        } catch (e: LlmException) {
+            close(e)
+        } catch (e: Exception) {
+            close(LlmException("OpenAI streaming error: ${e.message}", cause = e))
         }
 
-        close()
         awaitClose { call.cancel() }
     }
 

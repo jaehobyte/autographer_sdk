@@ -35,7 +35,7 @@ class HistoryManager(
 
     suspend fun addMessage(sessionId: String, message: Message) {
         val session = store.load(sessionId) ?: return
-        val processedMessage = applyContentPolicy(message, session.messages.size)
+        val processedMessage = applyContentPolicy(message)
         session.messages.add(processedMessage)
         session.updatedAt = System.currentTimeMillis()
         store.save(session)
@@ -54,19 +54,43 @@ class HistoryManager(
         return store.listAll()
     }
 
-    private fun applyContentPolicy(message: Message, turnIndex: Int): Message {
+    private fun applyContentPolicy(message: Message): Message {
         if (contentPolicy == ContentStoragePolicy.INLINE) return message
 
-        val processedParts = message.parts.map { part ->
+        val processedParts = message.parts.mapNotNull { part ->
             when (contentPolicy) {
                 ContentStoragePolicy.INLINE -> part
-                ContentStoragePolicy.REFERENCE -> part // keep as-is; URL parts already reference
+                ContentStoragePolicy.REFERENCE -> convertToReferenceIfMedia(part)
                 ContentStoragePolicy.DESCRIPTION -> convertToDescriptionIfMedia(part)
                 ContentStoragePolicy.DISCARD -> discardMediaPart(part)
             }
-        }.filterNotNull()
+        }
 
         return message.copy(parts = processedParts)
+    }
+
+    private fun convertToReferenceIfMedia(part: MessagePart): MessagePart {
+        return when (part) {
+            is MessagePart.Text -> part
+            is MessagePart.ImageUrl -> part
+            is MessagePart.ImageBase64 -> MessagePart.Description(
+                com.autographer.agent.content.ContentType.IMAGE,
+                "[Image: ${part.mimeType}, base64 reference omitted]"
+            )
+            is MessagePart.VideoFrames -> MessagePart.Description(
+                com.autographer.agent.content.ContentType.VIDEO,
+                "[Video: ${part.frames.size} frames, reference omitted]"
+            )
+            is MessagePart.AudioData -> MessagePart.Description(
+                com.autographer.agent.content.ContentType.AUDIO,
+                "[Audio: ${part.mimeType}, reference omitted]"
+            )
+            is MessagePart.FileData -> MessagePart.Description(
+                com.autographer.agent.content.ContentType.FILE,
+                "[File: ${part.fileName}, reference omitted]"
+            )
+            is MessagePart.Description -> part
+        }
     }
 
     private fun convertToDescriptionIfMedia(part: MessagePart): MessagePart {
@@ -96,7 +120,6 @@ class HistoryManager(
         }
     }
 
-    @Suppress("USELESS_CAST")
     private fun discardMediaPart(part: MessagePart): MessagePart? {
         return when (part) {
             is MessagePart.Text -> part

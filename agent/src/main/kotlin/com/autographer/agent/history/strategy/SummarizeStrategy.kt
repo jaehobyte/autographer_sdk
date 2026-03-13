@@ -9,6 +9,7 @@ import com.autographer.agent.model.Role
 class SummarizeStrategy(
     private val summarizer: LlmProvider,
     private val recentWindowSize: Int = 5,
+    private val summaryConfig: LlmConfig? = null,
 ) : HistoryStrategy {
 
     override suspend fun compact(messages: List<Message>, maxTokens: Int): List<Message> {
@@ -57,13 +58,15 @@ class SummarizeStrategy(
             ),
         )
 
+        val config = summaryConfig ?: LlmConfig(
+            model = summarizer.defaultModel(),
+            temperature = 0.3f,
+            maxOutputTokens = 500,
+        )
+
         val response = summarizer.complete(
             messages = summaryRequest,
-            config = LlmConfig(
-                model = "gpt-4o-mini",
-                temperature = 0.3f,
-                maxOutputTokens = 500,
-            ),
+            config = config,
         )
 
         return response.message.parts

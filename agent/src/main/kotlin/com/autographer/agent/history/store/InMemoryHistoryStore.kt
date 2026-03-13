@@ -2,6 +2,7 @@ package com.autographer.agent.history.store
 
 import com.autographer.agent.history.ConversationSession
 import com.autographer.agent.history.SessionMeta
+import com.autographer.agent.model.MessagePart
 import java.util.concurrent.ConcurrentHashMap
 
 class InMemoryHistoryStore : HistoryStore {
@@ -26,7 +27,7 @@ class InMemoryHistoryStore : HistoryStore {
             SessionMeta(
                 id = session.id,
                 title = session.messages.firstOrNull()?.parts
-                    ?.filterIsInstance<com.autographer.agent.model.MessagePart.Text>()
+                    ?.filterIsInstance<MessagePart.Text>()
                     ?.firstOrNull()?.text?.take(50),
                 messageCount = session.messages.size,
                 createdAt = session.createdAt,

@@ -16,6 +16,8 @@ interface LlmProvider {
 
     fun maxContextTokens(): Int
 
+    fun defaultModel(): String
+
     suspend fun complete(
         messages: List<Message>,
         tools: List<ToolSchema>? = null,

@@ -23,6 +23,7 @@ class LocalLlmProvider(
         LlmCapability.STREAMING,
     ),
     private val contextSize: Int = 4096,
+    private val modelName: String = "local-model",
 ) : LlmProvider {
 
     private val delegate: OpenAiProvider = if (client != null) {
@@ -36,6 +37,8 @@ class LocalLlmProvider(
     override fun capabilities(): Set<LlmCapability> = supportedCapabilities
 
     override fun maxContextTokens(): Int = contextSize
+
+    override fun defaultModel(): String = modelName
 
     override suspend fun complete(
         messages: List<Message>,

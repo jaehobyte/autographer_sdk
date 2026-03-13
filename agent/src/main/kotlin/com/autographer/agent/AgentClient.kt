@@ -21,13 +21,16 @@ import com.autographer.agent.model.UserRequestBuilder
 import com.autographer.agent.tool.Tool
 import com.autographer.agent.tool.ToolManager
 import com.autographer.agent.util.Logger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -37,8 +40,11 @@ class AgentClient private constructor(
     private val historyManager: HistoryManager,
     private val contentProcessor: ContentProcessor,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var currentSessionId: String? = null
+    private val exceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Logger.e("Uncaught agent exception: ${throwable.message}", throwable)
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main + exceptionHandler)
+    private val currentSessionId = AtomicReference<String?>(null)
 
     /**
      * Send a text-only request.
@@ -47,7 +53,7 @@ class AgentClient private constructor(
         prompt: String,
         callback: AgentCallback,
     ): RequestHandle {
-        return request(UserRequest.text(prompt, currentSessionId), callback)
+        return request(UserRequest.text(prompt, currentSessionId.get()), callback)
     }
 
     /**
@@ -59,12 +65,12 @@ class AgentClient private constructor(
     ): RequestHandle {
         val requestId = UUID.randomUUID().toString()
         val stateFlow = MutableStateFlow<AgentState>(AgentState.Idle)
-        var timeoutSetter: ((Duration) -> Unit)? = null
+        val cancellationRef = AtomicReference<CancellationController?>(null)
 
         val job = scope.launch {
-            val sessionId = request.sessionId ?: currentSessionId ?: run {
+            val sessionId = request.sessionId ?: currentSessionId.get() ?: run {
                 val session = historyManager.createSession(config.systemPrompt)
-                currentSessionId = session.id
+                currentSessionId.set(session.id)
                 session.id
             }
 
@@ -76,30 +82,34 @@ class AgentClient private constructor(
                 contentProcessor = contentProcessor,
             )
 
-            val cancellation = CancellationController(coroutineContext[kotlinx.coroutines.Job]!!)
+            val cancellation = CancellationController(coroutineContext[Job]!!)
             cancellation.setTimeout(config.defaultTimeout)
-            timeoutSetter = { duration -> cancellation.setTimeout(duration) }
+            cancellationRef.set(cancellation)
 
-            // Mirror orchestrator state
-            scope.launch {
+            // Mirror orchestrator state — cancel when parent job completes
+            val mirrorJob = scope.launch {
                 orchestrator.stateFlow.collect { stateFlow.value = it }
             }
 
-            val response = orchestrator.execute(
-                request = request.copy(sessionId = sessionId),
-                sessionId = sessionId,
-                callback = callback,
-                cancellation = cancellation,
-            )
+            try {
+                val response = orchestrator.execute(
+                    request = request.copy(sessionId = sessionId),
+                    sessionId = sessionId,
+                    callback = callback,
+                    cancellation = cancellation,
+                )
 
-            callback.onComplete(response)
+                callback.onComplete(response)
+            } finally {
+                mirrorJob.cancel()
+            }
         }
 
         return RequestHandle(
             id = requestId,
             job = job,
             stateFlow = stateFlow,
-            onTimeout = { duration -> timeoutSetter?.invoke(duration) },
+            onTimeout = { duration -> cancellationRef.get()?.setTimeout(duration) },
         )
     }
 
@@ -119,7 +129,7 @@ class AgentClient private constructor(
      */
     suspend fun newSession(systemPrompt: String? = null): String {
         val session = historyManager.createSession(systemPrompt ?: config.systemPrompt)
-        currentSessionId = session.id
+        currentSessionId.set(session.id)
         return session.id
     }
 
@@ -129,7 +139,7 @@ class AgentClient private constructor(
     suspend fun loadSession(sessionId: String): Boolean {
         val session = historyManager.loadSession(sessionId)
         return if (session != null) {
-            currentSessionId = sessionId
+            currentSessionId.set(sessionId)
             true
         } else {
             false
@@ -148,9 +158,7 @@ class AgentClient private constructor(
      */
     suspend fun deleteSession(sessionId: String) {
         historyManager.deleteSession(sessionId)
-        if (currentSessionId == sessionId) {
-            currentSessionId = null
-        }
+        currentSessionId.compareAndSet(sessionId, null)
     }
 
     /**
@@ -208,11 +216,7 @@ class AgentClient private constructor(
 
             val config = AgentConfig(
                 llmProvider = provider,
-                llmConfig = llmConfig ?: LlmConfig(model = "gpt-4o"),
-                tools = tools,
-                historyStrategy = historyStrategy,
-                historyStore = historyStore,
-                contentStoragePolicy = contentStoragePolicy,
+                llmConfig = llmConfig ?: LlmConfig(model = provider.defaultModel()),
                 systemPrompt = systemPrompt,
                 maxIterations = maxIterations,
                 tokenBudget = tokenBudget,

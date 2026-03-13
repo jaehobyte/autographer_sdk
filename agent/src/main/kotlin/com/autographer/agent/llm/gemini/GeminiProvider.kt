@@ -1,5 +1,6 @@
 package com.autographer.agent.llm.gemini
 
+import com.autographer.agent.core.LlmException
 import com.autographer.agent.llm.LlmCapability
 import com.autographer.agent.llm.LlmConfig
 import com.autographer.agent.llm.LlmProvider
@@ -40,6 +41,8 @@ class GeminiProvider(
 
     override fun maxContextTokens(): Int = 1_000_000
 
+    override fun defaultModel(): String = "gemini-1.5-pro"
+
     override suspend fun complete(
         messages: List<Message>,
         tools: List<ToolSchema>?,
@@ -57,14 +60,17 @@ class GeminiProvider(
 
         val response = client.newCall(request).execute()
         val body = response.body?.string()
-            ?: throw RuntimeException("Empty response body")
+            ?: throw LlmException("Empty response body from Gemini")
 
         if (!response.isSuccessful) {
-            throw RuntimeException("Gemini API error ${response.code}: $body")
+            throw LlmException(
+                "Gemini API error: $body",
+                code = response.code,
+            )
         }
 
         val apiResponse = JsonUtil.fromJson<GeminiResponse>(body)
-            ?: throw RuntimeException("Failed to parse Gemini response")
+            ?: throw LlmException("Failed to parse Gemini response")
 
         GeminiMapper.fromApiResponse(apiResponse)
     }
@@ -85,40 +91,48 @@ class GeminiProvider(
             .build()
 
         val call = client.newCall(request)
-        val response = call.execute()
-
-        if (!response.isSuccessful) {
-            val errorBody = response.body?.string() ?: "Unknown error"
-            close(RuntimeException("Gemini API error ${response.code}: $errorBody"))
-            return@callbackFlow
-        }
-
-        val reader = BufferedReader(
-            InputStreamReader(response.body!!.byteStream())
-        )
 
         try {
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val data = line ?: continue
-                if (!data.startsWith("data: ")) continue
-                val json = data.removePrefix("data: ").trim()
+            val response = call.execute()
 
-                try {
-                    val chunk = JsonUtil.fromJson<GeminiResponse>(json)
-                    val candidate = chunk?.candidates?.firstOrNull() ?: continue
-                    val mapped = GeminiMapper.fromStreamChunk(candidate)
-                    trySend(mapped)
-                } catch (e: Exception) {
-                    Logger.w("Failed to parse Gemini stream chunk", e)
-                }
+            if (!response.isSuccessful) {
+                val errorBody = response.body?.string() ?: "Unknown error"
+                throw LlmException(
+                    "Gemini API error: $errorBody",
+                    code = response.code,
+                )
             }
-        } finally {
-            reader.close()
-            response.close()
+
+            val reader = BufferedReader(
+                InputStreamReader(response.body!!.byteStream())
+            )
+
+            try {
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    val data = line ?: continue
+                    if (!data.startsWith("data: ")) continue
+                    val json = data.removePrefix("data: ").trim()
+
+                    try {
+                        val chunk = JsonUtil.fromJson<GeminiResponse>(json)
+                        val candidate = chunk?.candidates?.firstOrNull() ?: continue
+                        val mapped = GeminiMapper.fromStreamChunk(candidate)
+                        trySend(mapped)
+                    } catch (e: Exception) {
+                        Logger.w("Failed to parse Gemini stream chunk", e)
+                    }
+                }
+            } finally {
+                reader.close()
+                response.close()
+            }
+        } catch (e: LlmException) {
+            close(e)
+        } catch (e: Exception) {
+            close(LlmException("Gemini streaming error: ${e.message}", cause = e))
         }
 
-        close()
         awaitClose { call.cancel() }
     }
 

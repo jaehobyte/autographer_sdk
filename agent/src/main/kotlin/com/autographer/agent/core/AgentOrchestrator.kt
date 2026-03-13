@@ -7,6 +7,7 @@ import com.autographer.agent.content.ContentProcessor
 import com.autographer.agent.content.DefaultContentProcessor
 import com.autographer.agent.history.HistoryManager
 import com.autographer.agent.llm.FinishReason
+import com.autographer.agent.llm.LlmCapability
 import com.autographer.agent.llm.LlmProvider
 import com.autographer.agent.llm.LlmResponse
 import com.autographer.agent.llm.TokenUsage
@@ -22,6 +23,8 @@ import com.autographer.agent.util.JsonUtil
 import com.autographer.agent.util.Logger
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 internal class AgentOrchestrator(
     private val config: AgentConfig,
@@ -30,7 +33,8 @@ internal class AgentOrchestrator(
     private val historyManager: HistoryManager,
     private val contentProcessor: ContentProcessor = DefaultContentProcessor(),
 ) {
-    val stateFlow = MutableStateFlow<AgentState>(AgentState.Idle)
+    private val _stateFlow = MutableStateFlow<AgentState>(AgentState.Idle)
+    val stateFlow: StateFlow<AgentState> = _stateFlow.asStateFlow()
 
     suspend fun execute(
         request: UserRequest,
@@ -39,7 +43,7 @@ internal class AgentOrchestrator(
         cancellation: CancellationController,
     ): AgentResponse {
         val toolCallHistory = mutableListOf<ToolCall>()
-        var lastUsage: TokenUsage? = null
+        var lastUsage: TokenUsage?
 
         try {
             emitState(AgentState.Planning, callback)
@@ -75,16 +79,16 @@ internal class AgentOrchestrator(
                 emitState(AgentState.AwaitingResponse, callback)
 
                 // Call LLM
-                val response = if (llmProvider.capabilities()
-                        .contains(com.autographer.agent.llm.LlmCapability.STREAMING)
-                ) {
+                val response = if (llmProvider.capabilities().contains(LlmCapability.STREAMING)) {
                     collectStreamResponse(
                         llmProvider.stream(messages, toolSchemas, config.llmConfig),
                         callback,
                         cancellation,
                     )
                 } else {
-                    llmProvider.complete(messages, toolSchemas, config.llmConfig)
+                    val result = llmProvider.complete(messages, toolSchemas, config.llmConfig)
+                    cancellation.checkCancellation()
+                    result
                 }
 
                 lastUsage = response.usage
@@ -200,21 +204,29 @@ internal class AgentOrchestrator(
             parts.add(MessagePart.Text(text))
         }
 
-        val toolCalls = toolCallBuilders.values.mapNotNull { builder ->
-            val name = builder.name ?: return@mapNotNull null
-            val id = builder.id ?: java.util.UUID.randomUUID().toString()
-            val args = try {
-                val argsStr = builder.argumentsBuilder.toString()
-                if (argsStr.isNotEmpty()) {
-                    JsonUtil.fromJson<Map<String, Any?>>(argsStr) ?: emptyMap()
-                } else {
-                    emptyMap()
+        // Sort by index to preserve tool call order
+        val toolCalls = toolCallBuilders.entries
+            .sortedBy { it.key }
+            .mapNotNull { (_, builder) ->
+                val name = builder.name
+                if (name == null) {
+                    Logger.w("Dropping tool call with null name (id=${builder.id})")
+                    return@mapNotNull null
                 }
-            } catch (e: Exception) {
-                emptyMap<String, Any?>()
+                val id = builder.id ?: java.util.UUID.randomUUID().toString()
+                val args = try {
+                    val argsStr = builder.argumentsBuilder.toString()
+                    if (argsStr.isNotEmpty()) {
+                        JsonUtil.fromJson<Map<String, Any?>>(argsStr) ?: emptyMap()
+                    } else {
+                        emptyMap()
+                    }
+                } catch (e: Exception) {
+                    Logger.w("Failed to parse tool call arguments for '$name'", e)
+                    emptyMap<String, Any?>()
+                }
+                ToolCall(id = id, name = name, arguments = args)
             }
-            ToolCall(id = id, name = name, arguments = args)
-        }
 
         return LlmResponse.Complete(
             message = Message(
@@ -228,7 +240,7 @@ internal class AgentOrchestrator(
     }
 
     private fun emitState(state: AgentState, callback: AgentCallback) {
-        stateFlow.value = state
+        _stateFlow.value = state
         callback.onStateChanged(state)
     }
 
